@@ -1,5 +1,5 @@
 
-<!-- V40.3 DASHBOARD CONVERSION -->
+<!-- V40.5 TARIFARIO MEMORIA CORREGIDO -->
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -778,7 +778,7 @@ function abrirTab(nombre){
 
   if(nombre==="presupuestos"){
     tabPresupuestos.classList.remove("hidden");
-    setTimeout(actualizarPresupuestoAutomatico,0);
+    if(!cargaInicialTarifasEnCurso)setTimeout(()=>actualizarPresupuestoAutomatico({silencioso:true}),0);
   }
 
   if(nombre==="nueva")
@@ -1814,9 +1814,24 @@ function activarTarifasLocal(){
 /* V32 PRESUPUESTO AUTOMATICO */
 function obtenerTarifaBase(){return 0;}
 
-function obtenerTarifaEstadia(tipo,ini,fin){if(!tipo||!ini||!fin)return 0;const r=[...document.querySelectorAll("#tablaPrecios tbody tr")].find(x=>(x.cells[0]?.innerText||"").includes(tipo));if(!r)return 0;const hs=[...document.querySelectorAll("#tablaPrecios thead th")],m=new Map();for(let i=1;i<hs.length;i++)m.set(hs[i].dataset.iso,numeroAR(r.cells[i]?.textContent||0));let total=0;for(let d=fechaSinHora(ini);d<fechaSinHora(fin);d.setDate(d.getDate()+1)){const iso=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`,v=m.get(iso)||0;if(v<=0)return 0;total+=v}return total}
+const tarifarioMemoria=new Map();
+function claveTarifaMemoria(tipo,iso){return `${String(tipo||"").trim().toLocaleLowerCase("es")}|${String(iso||"").slice(0,10)}`}
+function obtenerTarifaEstadia(tipo,ini,fin){
+ if(!tipo||!ini||!fin)return 0;
+ const r=[...document.querySelectorAll("#tablaPrecios tbody tr")].find(x=>(x.cells[0]?.innerText||"").includes(tipo));
+ const hs=[...document.querySelectorAll("#tablaPrecios thead th")],dom=new Map();
+ if(r)for(let i=1;i<hs.length;i++)dom.set(hs[i].dataset.iso,numeroAR(r.cells[i]?.textContent||0));
+ let total=0;
+ for(let d=fechaSinHora(ini);d<fechaSinHora(fin);d.setDate(d.getDate()+1)){
+  const iso=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  const memoria=numeroAR(tarifarioMemoria.get(claveTarifaMemoria(tipo,iso))||0),v=memoria>0?memoria:(dom.get(iso)||0);
+  if(v<=0)return 0;total+=v;
+ }
+ return total;
+}
 
-function actualizarPresupuestoAutomatico(){
+let cargaInicialTarifasEnCurso=true;
+function actualizarPresupuestoAutomatico(opciones={}){
  const tipoEl=document.getElementById("presTipoHabitacion");
  const usdEl=document.getElementById("presUsd");
  const arsEl=document.getElementById("presArs");
@@ -1830,7 +1845,7 @@ function actualizarPresupuestoAutomatico(){
   notificar(`Tarifa calculada automáticamente: USD ${Math.round(total)}`);
  }else{
   usdEl.value="";if(arsEl)arsEl.value="";
-  notificar("No se pudo calcular: falta cargar la tarifa de una o más noches para esta categoría.","error");
+  if(!cargaInicialTarifasEnCurso&&!opciones.silencioso)notificar("No se pudo calcular: falta cargar la tarifa de una o más noches para esta categoría.","error");
  }
 }
 const presTipoHabitacionEl=document.getElementById("presTipoHabitacion");
@@ -1972,10 +1987,15 @@ async function cargarTarifasSupabaseEnTabla(){
  if(error)throw error;
  let headers=[...document.querySelectorAll("#tablaPrecios thead th")],rows=[...document.querySelectorAll("#tablaPrecios tbody tr")];
  if(headers.length<2||rows.length<4){generarCalendarioPrecios();headers=[...document.querySelectorAll("#tablaPrecios thead th")];rows=[...document.querySelectorAll("#tablaPrecios tbody tr")]}
+ tarifarioMemoria.clear();
+ (data||[]).forEach(t=>tarifarioMemoria.set(claveTarifaMemoria(t.tipo_habitacion,t.fecha),Number(t.tarifa_usd||0)));
  const mapa=new Map((data||[]).map(t=>[sbClaveTarifa(t.tipo_habitacion,t.fecha),t.tarifa_usd]));let cargadas=0;
  rows.forEach(row=>{const tipo=(row.cells[0]?.innerText||"").split("\n")[0].trim();for(let i=1;i<headers.length;i++){const key=sbClaveTarifa(tipo,headers[i].dataset.iso);if(mapa.has(key)){row.cells[i].textContent=String(Math.round(sbNum(mapa.get(key))));cargadas++}else{row.cells[i].textContent=""}}});
  const estado=document.getElementById("estadoGuardadoTarifas");if(estado)estado.textContent=`${cargadas} tarifas con importe cargadas desde Supabase; ${1212-cargadas} fechas aún sin tarifa.`;
  if(cargadas)guardarTarifasLocal();
+ cargaInicialTarifasEnCurso=false;
+ await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+ actualizarPresupuestoAutomatico({silencioso:true});
  return cargadas;
 }
 
@@ -2071,7 +2091,16 @@ async function sbMostrarAplicacion(session){
   sbAuthGate.style.display="none";
   sbSessionBar.style.display="flex";
   sbUserEmail.textContent=session.user.email||"Usuario autenticado";
-  try{await cargarDatosOficialesSupabase()}catch(e){console.error(e);sbConnectionStatus.style.display="block";sbConnectionStatus.textContent="Error al cargar datos: "+e.message;}
+  cargaInicialTarifasEnCurso=true;
+  const estadoTarifasInicial=document.getElementById("estadoGuardadoTarifas");if(estadoTarifasInicial)estadoTarifasInicial.textContent="Cargando tarifas desde Supabase...";
+  try{
+    await cargarDatosOficialesSupabase();
+    cargaInicialTarifasEnCurso=false;
+    actualizarPresupuestoAutomatico({silencioso:true});
+  }catch(e){
+    cargaInicialTarifasEnCurso=false;
+    console.error(e);sbConnectionStatus.style.display="block";sbConnectionStatus.textContent="Error al cargar datos: "+e.message;
+  }
   const {data:perfil,error:perfilError}=await sbClient.from("perfiles").select("rol").eq("id",session.user.id).single();
   window.sbRolActual=perfil?.rol||"operador";
   window.sbUsuarioIdActual=session.user.id;
@@ -2084,6 +2113,7 @@ async function sbMostrarAplicacion(session){
   if(!permitidas.includes(pestanaGuardada))pestanaGuardada=window.sbRolActual==="admin"?"dashboard":"presupuestos";
   const activa=document.querySelector('.tab-btn.active')?.dataset.tab;
   if(!permitidas.includes(activa)||activa!==pestanaGuardada)abrirTab(pestanaGuardada);
+  if(pestanaGuardada==="presupuestos")setTimeout(()=>actualizarPresupuestoAutomatico({silencioso:true}),0);
   if(perfilError)console.warn("No se pudo consultar el rol",perfilError);
   try{await sbProbarLectura()}catch(e){sbConnectionStatus.style.display="block";sbConnectionStatus.textContent="Error de conexión: "+e.message;sbConnectionStatus.style.color="#9f3f46";}
 }
